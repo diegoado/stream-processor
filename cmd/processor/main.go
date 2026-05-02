@@ -25,8 +25,8 @@ func main() {
 	defer cancel()
 
 	p := processor.NewProcessor(cfg)
-	if startErr := p.Start(ctx); startErr != nil {
-		log.Error("processor error", slog.Any("error", startErr))
-		os.Exit(1) //nolint:gocritic // exit is intentional after deferred cancel
+	if err = p.Start(ctx); err != nil {
+		log.Error("processor error", slog.Any("error", err))
+		panic(err)
 	}
 }

@@ -4,12 +4,12 @@ import "time"
 
 // KafkaProducerConfig holds Kafka producer tuning settings.
 type KafkaProducerConfig struct {
-	Acks            string        `env:"KAFKA_PRODUCER_ACKS"             envDefault:"all"`
-	CompressionType string        `env:"KAFKA_PRODUCER_COMPRESSION_TYPE" envDefault:"gzip"`
-	LingerMs        int           `env:"KAFKA_PRODUCER_LINGER_MS"        envDefault:"5"`
-	BatchSize       int           `env:"KAFKA_PRODUCER_BATCH_SIZE"       envDefault:"131072"`
-	BufferMemory    int           `env:"KAFKA_PRODUCER_BUFFER_MEMORY"    envDefault:"16777216"`
-	FlushTimeout    time.Duration `env:"KAFKA_PRODUCER_FLUSH_TIMEOUT"    envDefault:"5s"`
+	Acks            string        `env:"KAFKA_PRODUCER_ACKS"              envDefault:"all"`
+	CompressionType string        `env:"KAFKA_PRODUCER_COMPRESSION_TYPE"  envDefault:"gzip"`
+	LingerMs        int           `env:"KAFKA_PRODUCER_LINGER_MS"         envDefault:"5"`
+	BatchSize       int           `env:"KAFKA_PRODUCER_BATCH_SIZE"        envDefault:"131072"`
+	BufferMaxKbytes int           `env:"KAFKA_PRODUCER_BUFFER_MAX_KBYTES" envDefault:"16384"`
+	FlushTimeout    time.Duration `env:"KAFKA_PRODUCER_FLUSH_TIMEOUT"     envDefault:"5s"`
 }
 
 // KafkaConsumerConfig holds Kafka consumer tuning settings.

@@ -235,6 +235,10 @@ linters:
         linters: [ gochecknoglobals ]
       - source: 'log\.(Error|Info|Warn|Debug)'
         linters: [ sloglint ]
+      - path: 'cmd/(producer|sender)/'
+        linters:
+          - mnd
+          - gosec
 
 output:
   formats:

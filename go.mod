@@ -7,8 +7,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.100.1
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.27
 	github.com/caarlos0/env/v10 v10.0.0
 	github.com/confluentinc/confluent-kafka-go/v2 v2.12.0
+	github.com/google/uuid v1.6.0
 	github.com/pkg/errors v0.9.1
 	github.com/xeipuuv/gojsonschema v1.2.0
 )

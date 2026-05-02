@@ -38,12 +38,12 @@ type producerImpl[T any] struct {
 
 func newProducer[T any](cfg config.KafkaConfig, ch chan confluent.Event) (Producer[T], error) {
 	p, err := confluent.NewProducer(&confluent.ConfigMap{
-		"bootstrap.servers": cfg.BootstrapServers,
-		"acks":              cfg.Producer.Acks,
-		"compression.type":  cfg.Producer.CompressionType,
-		"linger.ms":         cfg.Producer.LingerMs,
-		"batch.size":        cfg.Producer.BatchSize,
-		"buffer.memory":     cfg.Producer.BufferMemory,
+		"bootstrap.servers":          cfg.BootstrapServers,
+		"acks":                       cfg.Producer.Acks,
+		"compression.type":           cfg.Producer.CompressionType,
+		"linger.ms":                  cfg.Producer.LingerMs,
+		"batch.size":                 cfg.Producer.BatchSize,
+		"queue.buffering.max.kbytes": cfg.Producer.BufferMaxKbytes,
 	})
 	if err != nil {
 		return nil, err

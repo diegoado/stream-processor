@@ -1,0 +1,184 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.0
+    hostname: zookeeper
+    container_name: zookeeper
+    restart: always
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - stream-processor
+
+  broker:
+    image: confluentinc/cp-kafka:7.9.0
+    hostname: broker
+    container_name: broker
+    restart: always
+    ports:
+      - "29092:29092"
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server broker:29092
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    depends_on:
+      - zookeeper
+    networks:
+      - stream-processor
+
+  init-broker:
+    image: confluentinc/cp-kafka:7.9.0
+    hostname: init-broker
+    container_name: init-broker
+    restart: on-failure
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      kafka-topics --bootstrap-server broker:29092 --list
+
+      echo ''
+      echo -e 'Creating topics...'
+      echo ''
+
+      cd /tmp
+      ./create-topics.sh
+      "
+    volumes:
+      - ./dockerfiles/scripts/kafka/create-topics.sh:/tmp/create-topics.sh
+      - ./dockerfiles/scripts/kafka/topics.txt:/tmp/topics.txt
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - stream-processor
+
+  localstack:
+    image: localstack/localstack:4.4.0
+    hostname: localstack
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,sqs,s3
+      - DEFAULT_REGION=us-east-1
+      - HOSTNAME=localstack
+      - LOCALSTACK_HOSTNAME=localstack
+    healthcheck:
+      test: awslocal s3 ls
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - ./dockerfiles/scripts/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+      - ./schemas:/tmp/schemas
+    networks:
+      - stream-processor
+
+  processor:
+    build: { context: ., dockerfile: Dockerfile }
+    hostname: processor
+    container_name: processor
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      AWS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      S3_SCHEMA_BUCKET: stream-processor
+      S3_SCHEMA_KEY: schemas/event_schema.json
+      PROCESSOR_EVENTS_TOPIC: events
+      PROCESSOR_ACCEPTED_EVENTS_TOPIC: arn:aws:sns:us-east-1:000000000000:events-topic
+      PROCESSOR_REJECTED_EVENTS_TOPIC: events.dlq
+    depends_on:
+      init-broker:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    networks:
+      - stream-processor
+
+  producer:
+    build: { context: ., dockerfile: dockerfiles/producer/Dockerfile }
+    hostname: producer
+    container_name: producer
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      PRODUCER_EVENTS_TOPIC: events
+    depends_on:
+      init-broker:
+        condition: service_completed_successfully
+    networks:
+      - stream-processor
+
+  sender-tenant-a:
+    build: { context: ., dockerfile: dockerfiles/sender/Dockerfile }
+    hostname: sender-tenant-a
+    container_name: sender-tenant-a
+    restart: on-failure
+    environment:
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-a-queue
+      AWS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      TENANT_ID: tenant-a
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - stream-processor
+
+  sender-tenant-b:
+    build: { context: ., dockerfile: dockerfiles/sender/Dockerfile }
+    hostname: sender-tenant-b
+    container_name: sender-tenant-b
+    restart: on-failure
+    environment:
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-b-queue
+      AWS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      TENANT_ID: tenant-b
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - stream-processor
+
+  sender-tenant-c:
+    build: { context: ., dockerfile: dockerfiles/sender/Dockerfile }
+    hostname: sender-tenant-c
+    container_name: sender-tenant-c
+    restart: on-failure
+    environment:
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-c-queue
+      AWS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      TENANT_ID: tenant-c
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - stream-processor
+
+networks:
+  stream-processor:
+    name: stream-processor
+    driver: bridge
