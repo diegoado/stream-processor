@@ -12,8 +12,8 @@ The **stream-processor** is a reactive Go service that consumes events from a Ka
                                            │
 [Producers] ──► [Kafka: events] ──► [Stream Processor] ──► [SNS Topic]
                                        │                       │
-                                       │               ┌──────┴──────┐
-                                       ▼               ▼             ▼
+                                       │               ┌───────┴──────┐
+                                       ▼               ▼              ▼
                               [Kafka: events.dlq]  [SQS: tenant-a] [SQS: tenant-b]
                               (invalid + reason)       │             │
                                                        ▼             ▼
@@ -47,31 +47,40 @@ The **stream-processor** is a reactive Go service that consumes events from a Ka
 
 ### 3.1 Event Schema (JSON Schema Draft-07)
 
-Stored in S3, validated using `xeipuuv/gojsonschema` (same lib as startrack-events-receiver):
+Stored in S3, validated using `xeipuuv/gojsonschema`.
+
+The schema uses a **default + override** pattern with `allOf` + `if/then` blocks:
+
+1. Every `event_type` has a **default** payload spec (in `$defs/defaults/`) — applies to all tenants
+2. Specific `(tenant_id, event_type)` pairs can **override** the default (in `$defs/overrides/`) — adds tenant-exclusive fields or changes required fields
+3. `tenant_id` — new tenants are accepted immediately and validated against the default spec for their event type
+4. Adding a tenant-specific override only requires updating the schema in S3 — no code changes, no redeployment
+
+**Base envelope:**
 
 ```json
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "properties": {
-    "event_id":     { "type": "string", "format": "uuid" },
-    "event_type":   { "type": "string" },
-    "tenant_id":    { "type": "string" },
-    "timestamp":    { "type": "string", "format": "date-time" },
-    "payload":      { "type": "object" }
-  },
-  "required": ["event_id", "event_type", "tenant_id", "timestamp", "payload"],
-  "additionalProperties": false
+  "required": ["event_id", "event_type", "tenant_id", "timestamp", "payload"]
 }
 ```
 
-| Field        | Type   | Description                                                              |
-|-------------|--------|--------------------------------------------------------------------------|
-| `event_id`  | string | UUID v4 identifying the event                                            |
-| `event_type`| string | Producer context (e.g., `monitoring.alert`, `user.action`)               |
-| `tenant_id` | string | Client/tenant identifier — used as SNS message attribute for SQS routing |
-| `timestamp` | string | ISO 8601 datetime when the event was created                             |
-| `payload`   | object | Event-specific data, opaque to the processor                             |
+**Event types:** `monitoring.alert`, `monitoring.metric`, `user.action`, `transaction.auth`, `webhook.dispatched`
+
+**Override examples (only where tenants diverge from default):**
+- `tenant-a` / `monitoring.alert`: adds `alert_url`, makes `source` required
+- `tenant-a` / `transaction.auth`: adds `risk_score`, makes `currency` required
+- `tenant-b` / `user.action`: adds `session_id`, makes `resource` and `session_id` required
+- `tenant-c` / `webhook.dispatched`: adds `callback_id`, makes `http_status` and `callback_id` required
+
+**Note:** Extra top-level fields do **not** make an event invalid. The processor strips any fields not defined in the schema before publishing to SNS. Only structural violations (missing required fields, wrong types, bad formats, invalid payload) cause rejection to the DLQ.
+
+| Field         | Type     | Description                                                              |
+|---------------|----------|--------------------------------------------------------------------------|
+| `event_id`    | string   | UUID v4 identifying the event                                            |
+| `event_type`  | string   | One of the 5 defined event types                                         |
+| `tenant_id`   | string   | Client/tenant identifier — any value accepted                            |
+| `timestamp`   | string   | ISO 8601 datetime when the event was created                             |
+| `payload`     | object   | Validated per event_type default, with optional tenant-specific override |
 
 ### 3.2 DLQ Message Format
 
@@ -89,20 +98,24 @@ Invalid events are produced to `events.dlq`:
 
 ### 4.1 Kafka — `confluentinc/confluent-kafka-go/v2` v2.12.0
 
-Same library used in startrack-events-receiver. No Schema Registry — plain JSON.
+No Schema Registry — plain JSON with built-in serialization/deserialization.
 
-- **Consumer**: consumer group on `events` topic, manual offset commit after processing
-- **DLQ Producer**: writes rejected events to `events.dlq` with error envelope
+- **Abstraction layer**: `pkg/kafka/` provides generic `Producer[T]` and `Consumer[T]` interfaces that handle JSON marshaling/unmarshaling internally
+- **Consumer**: generic `Consumer[event.Event]` with consumer group, manual offset commit after processing
+- **DLQ Producer**: sync `Producer[event.RejectedEvent]` with delivery channel — waits for broker acknowledgment before commit
+- **Mock Producer**: async `Producer[event.Event]` (fire-and-forget)
+- **Message key**: JSON-serialized `{tenant_id, event_type}` pair for partition routing
+- **Producer tuning**: acks=all, gzip compression, configurable linger/batch/buffer
+- **Consumer tuning**: configurable fetch sizes, poll intervals, session timeouts
 - Consumer group ensures resilience: if the processor crashes, another instance resumes from last committed offset
 
 ### 4.2 JSON Schema Validation — `xeipuuv/gojsonschema` v1.2.0
 
-Same library and `BodyValidator` pattern from startrack-events-receiver. Differences:
-
-- Schema loaded from S3 instead of `//go:embed`
-- Background goroutine polls S3 every 5 minutes using `HeadObject` (ETag comparison)
-- Downloads via `GetObject` only when ETag changes
-- Thread-safe schema swap using `sync.RWMutex`
+- **Validator** (`schema_validator.go`): validates events, sanitizes payload fields via `ValidateAndSanitize`
+- **DataSchema** (`data_schema.go`): parses `$defs/defaults` and `$defs/overrides` from the JSON Schema to build a payload field index — used to strip extra payload fields before publishing
+- **Loader** (`loader.go`): fetches schema from S3, background goroutine polls every 5 minutes using `HeadObject` (ETag comparison), downloads via `GetObject` only when ETag changes
+- Thread-safe schema swap using `sync.RWMutex` (only on `Update`)
+- Top-level event fields are sanitized by the typed `event.Event` struct (JSON deserialization ignores unknown fields)
 
 ### 4.3 SNS + SQS Fan-out (LocalStack)
 
@@ -115,11 +128,29 @@ Same library and `BodyValidator` pattern from startrack-events-receiver. Differe
 
 ```
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-KAFKA_CONSUMER_GROUP_ID=stream-processor
-KAFKA_EVENTS_TOPIC=events
-KAFKA_DLQ_TOPIC=events.dlq
+KAFKA_GROUP_ID=stream-processor
 
-SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:events-topic
+KAFKA_PRODUCER_ACKS=all
+KAFKA_PRODUCER_COMPRESSION_TYPE=gzip
+KAFKA_PRODUCER_LINGER_MS=5
+KAFKA_PRODUCER_BATCH_SIZE=131072
+KAFKA_PRODUCER_BUFFER_MEMORY=16777216
+KAFKA_PRODUCER_FLUSH_TIMEOUT=5s
+
+KAFKA_CONSUMER_AUTO_OFFSET_RESET=latest
+KAFKA_CONSUMER_MAX_POLL_RECORDS=5000
+KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS=300000
+KAFKA_CONSUMER_SESSION_TIMEOUT_MS=30000
+KAFKA_CONSUMER_HEARTBEAT_INTERVAL_MS=5000
+KAFKA_CONSUMER_FETCH_MIN_BYTES=2097152
+KAFKA_CONSUMER_FETCH_MAX_BYTES=104857600
+KAFKA_CONSUMER_FETCH_MAX_WAIT_MS=10000
+KAFKA_CONSUMER_MAX_PARTITION_FETCH_BYTES=10485760
+
+PROCESSOR_EVENTS_TOPIC=events
+PROCESSOR_ACCEPTED_EVENTS_TOPIC=arn:aws:sns:us-east-1:000000000000:events-topic
+PROCESSOR_REJECTED_EVENTS_TOPIC=events.dlq
+PROCESSOR_POLL_TIMEOUT=100ms
 
 S3_SCHEMA_BUCKET=stream-processor-schemas
 S3_SCHEMA_KEY=schemas/event_schema.json
@@ -142,24 +173,40 @@ stream-processor/
 │   │   ├── consumer.go            # Kafka consumer loop + graceful shutdown
 │   │   └── consumer_test.go
 │   ├── handler/
-│   │   ├── handler.go             # Validate → publish or reject
+│   │   ├── handler.go             # Validate → sanitize → publish or reject
 │   │   └── handler_test.go
+│   ├── processor/
+│   │   └── processor.go           # Wires and runs the stream processing pipeline
 │   ├── schema/
 │   │   ├── loader.go              # S3 schema loader with auto-refresh
+│   │   ├── schema_validator.go    # JSON Schema validation + sanitization
+│   │   ├── data_schema.go         # Payload field index (defaults + overrides)
 │   │   └── loader_test.go
 │   ├── publisher/
-│   │   ├── sns.go                 # SNS publisher (valid events)
-│   │   └── sns_test.go
+│   │   ├── sns_publisher.go       # SNS publisher (valid events)
+│   │   └── sns_publisher_test.go
 │   └── dlq/
-│       ├── producer.go            # Kafka DLQ producer (invalid events)
-│       └── producer_test.go
+│       ├── dlq_producer.go        # Kafka DLQ producer (invalid events)
+│       └── dlq_producer_test.go
 ├── pkg/
-│   ├── config/config.go           # Env-based config structs
+│   ├── aws/
+│   │   ├── s3.go                  # S3 client interface + factory
+│   │   └── sns.go                 # SNS client interface + factory
+│   ├── kafka/
+│   │   ├── producer.go            # Generic Kafka producer (async + sync)
+│   │   └── consumer.go            # Generic Kafka consumer with JSON deserialization
+│   ├── config/
+│   │   ├── config.go              # Config wrapper + Load()
+│   │   ├── aws.go                 # AWSConfig
+│   │   ├── kafka.go               # KafkaConfig + producer/consumer tuning
+│   │   ├── processor.go           # ProcessorConfig (topics + poll timeout)
+│   │   └── schema.go              # SchemaConfig
 │   ├── event/event.go             # Event types + DLQ envelope
+│   ├── utilities/sanitize.go      # Payload sanitization
 │   └── logger/logger.go           # slog wrapper (JSON prod / text dev)
 ├── schemas/
 │   └── event_schema.json          # JSON Schema (uploaded to S3 by init script)
-├── godog/
+├── integration_test/
 │   ├── go.mod                     # Separate module (like tracking-partition-manager)
 │   ├── entrypoint_integration_test.go  # TestMain: setup infra, init suite, teardown
 │   ├── cucumber_integration_test.go    # TestXxx per feature file
@@ -184,7 +231,10 @@ stream-processor/
 │   ├── setup-hooks.sh             # Git hooks installer (pure shell, no JS)
 │   ├── lint.sh
 │   ├── test.sh
+│   ├── test-all.sh
 │   ├── coverage.sh
+│   ├── mutation-test.sh
+│   ├── check-mutants.sh
 │   ├── integration-test.sh
 │   ├── format.sh
 │   └── install.sh
@@ -206,7 +256,7 @@ stream-processor/
 Follows tracking-partition-manager pattern — all targets delegate to `scripts/`:
 
 ```makefile
-.PHONY: help install format lint test coverage integration-test ci local-up local-down
+.PHONY: help install format lint test test-all coverage mutation-test check-mutants integration-test ci local-up local-down
 
 help:             ## Show command list
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -223,13 +273,22 @@ lint:             ## Run linter checks
 test:             ## Run unit tests
 	@./scripts/test.sh $(ARGS)
 
+test-all:         ## Run unit and integration tests
+	@./scripts/test-all.sh $(ARGS)
+
 coverage:         ## Run tests and check minimum coverage
 	@./scripts/coverage.sh $(ARGS)
+
+mutation-test:    ## Run mutation tests
+	@./scripts/mutation-test.sh
+
+check-mutants:    ## Run mutation tests and check mutator coverage
+	@./scripts/check-mutants.sh
 
 integration-test: ## Run integration tests (godog + testcontainers)
 	@./scripts/integration-test.sh $(ARGS)
 
-ci: install lint coverage ## Execute all project checks
+ci: install lint coverage check-mutants ## Execute all project checks
 
 local-up:         ## Start docker-compose (Kafka + LocalStack + mock services)
 	docker compose up -d
@@ -238,9 +297,9 @@ local-down:       ## Stop docker-compose
 	docker compose down
 ```
 
-### 6.2 Git Hooks (Go-only, no JavaScript)
+### 6.2 Git Hooks
 
-Pure shell approach — no husky, no commitlint, no node_modules:
+Pure shell approach:
 
 **`scripts/setup-hooks.sh`** — called by `make install`:
 - Copies hook scripts to `.git/hooks/`
@@ -257,7 +316,7 @@ Pure shell approach — no husky, no commitlint, no node_modules:
 ### 6.3 Linting
 
 `.golangci.yml` adapted from tracking-partition-manager:
-- `goimports` with local prefix `github.com/olxbr/stream-processor`
+- `goimports` with local prefix `github.com/diegoado/stream-processor`
 - `golines` max 120 chars
 - `testpackage` enforcement
 - `log/slog` enforcement, no globals
@@ -280,9 +339,9 @@ Pure shell approach — no husky, no commitlint, no node_modules:
 
 Follows the exact same pattern as tracking-partition-manager.
 
-**Module structure**: separate `godog/` Go module with its own `go.mod`, referencing the main module via `replace` directive.
+**Module structure**: separate `integration_test/` Go module with its own `go.mod`, referencing the main module via `replace` directive.
 
-**Infrastructure** (`godog/testsuite/containers/`):
+**Infrastructure** (`integration_test/testsuite/containers/`):
 
 ```go
 // containers.go
@@ -303,7 +362,7 @@ func (i *Infrastructure) LocalStackEndpoint(ctx context.Context) (string, error)
 - LocalStack: SNS, SQS, S3 (with init script that creates resources + uploads schema)
 - Kafka + Zookeeper: topics `events` and `events.dlq` auto-created
 
-**Entrypoint** (`godog/entrypoint_integration_test.go`):
+**Entrypoint** (`integration_test/entrypoint_integration_test.go`):
 
 ```go
 func TestMain(m *testing.M) {
@@ -319,18 +378,18 @@ func TestMain(m *testing.M) {
 }
 ```
 
-**Suite client** (`godog/testsuite/suite.go`):
+**Suite client** (`integration_test/testsuite/suite.go`):
 
 ```go
 type SuiteClient struct {
     KafkaProducer  *KafkaTestProducer   // produces test events to 'events' topic
     KafkaConsumer  *KafkaTestConsumer   // reads from 'events.dlq' to verify rejections
     SQS            *SQSTestClient       // reads from tenant queues to verify delivery
-    S3             *S3TestClient         // uploads/updates schema in S3
+    S3             *S3TestClient        // uploads/updates schema in S3
 }
 ```
 
-**Feature files** (`godog/features/`):
+**Feature files** (`integration_test/features/`):
 
 ```gherkin
 # event_processing.feature
@@ -378,20 +437,20 @@ Feature: Event rejection
     Then the event should appear in the DLQ topic
     And the DLQ message should contain error "Does not match format 'date-time'"
 
-  Scenario: Schema update is picked up after refresh
-    Given a valid event with an extra field "unexpected_field"
+  Scenario: Event with extra fields is sanitized and delivered
+    Given a valid event for tenant "tenant-a" with an extra field "unexpected_field"
     When the event is produced to the events topic
-    Then the event should appear in the DLQ topic
-    And the DLQ message should contain error "Additional property unexpected_field is not allowed"
+    Then the event should be received in the "tenant-a-queue" SQS queue
+    And the delivered event should not contain the field "unexpected_field"
 ```
 
-**Step definitions** (`godog/steps/`):
+**Step definitions** (`integration_test/steps/`):
 
 - `common.go`: `ScenarioCtx` struct holding `*testsuite.SuiteClient`, shared Given/Then steps, `After` hook for cleanup
 - `processing.go`: `InitializeProcessingScenario` — steps for valid event flow
 - `rejection.go`: `InitializeRejectionScenario` — steps for invalid event flow
 
-**Test runner** (`godog/cucumber_integration_test.go`):
+**Test runner** (`integration_test/cucumber_integration_test.go`):
 
 ```go
 func TestEventProcessing(t *testing.T) {
@@ -423,15 +482,15 @@ func TestEventRejection(t *testing.T) {
 }
 ```
 
-**Key godog dependencies** (mirroring tracking-partition-manager):
+**Key godog dependencies**:
 
-| Library | Purpose |
-|---------|---------|
-| `cucumber/godog` v0.15.1 | BDD test framework |
-| `testcontainers/testcontainers-go` v0.41.0 | Container lifecycle |
-| `testcontainers/testcontainers-go/modules/localstack` v0.41.0 | LocalStack module |
-| `rdumont/assistdog` | Table parsing helpers |
-| `stretchr/testify` | Assertions |
+| Library                                                       | Purpose               |
+|---------------------------------------------------------------|-----------------------|
+| `cucumber/godog` v0.15.1                                      | BDD test framework    |
+| `testcontainers/testcontainers-go` v0.41.0                    | Container lifecycle   |
+| `testcontainers/testcontainers-go/modules/localstack` v0.41.0 | LocalStack module     |
+| `rdumont/assistdog`                                           | Table parsing helpers |
+| `stretchr/testify`                                            | Assertions            |
 
 ## 8. Docker Compose (Local Environment)
 
@@ -503,14 +562,14 @@ services:
 
 ## 9. Key Libraries
 
-| Library | Version | Purpose |
-|---------|---------|---------|
-| `confluentinc/confluent-kafka-go/v2` | v2.12.0 | Kafka consumer + DLQ producer |
-| `xeipuuv/gojsonschema` | v1.2.0 | JSON Schema validation |
-| `aws-sdk-go-v2` | latest | SNS publish, SQS receive, S3 schema loading |
-| `caarlos0/env/v10` | v10.0.0 | Environment-based configuration |
-| `stretchr/testify` | v1.9.0 | Unit test assertions + mocks |
-| `log/slog` (stdlib) | — | Structured logging (JSON prod / text dev) |
+| Library                              | Version  | Purpose                                     |
+|--------------------------------------|----------|---------------------------------------------|
+| `confluentinc/confluent-kafka-go/v2` | v2.12.0  | Kafka consumer + DLQ producer               |
+| `xeipuuv/gojsonschema`               | v1.2.0   | JSON Schema validation                      |
+| `aws-sdk-go-v2`                      | latest   | SNS publish, SQS receive, S3 schema loading |
+| `caarlos0/env/v10`                   | v10.0.0  | Environment-based configuration             |
+| `stretchr/testify`                   | v1.9.0   | Unit test assertions + mocks                |
+| `log/slog` (stdlib)                  | —        | Structured logging (JSON prod / text dev)   |
 
 ## 10. Graceful Shutdown
 

@@ -1,0 +1,222 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "monitoring.alert",
+        "monitoring.metric",
+        "user.action",
+        "transaction.auth",
+        "webhook.dispatched"
+      ]
+    },
+    "tenant_id": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "required": ["event_id", "event_type", "tenant_id", "timestamp", "payload"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": { "const": "monitoring.alert" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/defaults/monitoring.alert" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "monitoring.metric" }
+        }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/defaults/monitoring.metric" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "user.action" }
+        }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/defaults/user.action" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "transaction.auth" }
+        }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/defaults/transaction.auth" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "webhook.dispatched" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/defaults/webhook.dispatched" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tenant_id": { "const": "tenant-a" }, "event_type": { "const": "monitoring.alert" }
+        }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/overrides/tenant-a/monitoring.alert" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tenant_id": { "const": "tenant-a" }, "event_type": { "const": "transaction.auth" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/overrides/tenant-a/transaction.auth" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tenant_id": { "const": "tenant-b" }, "event_type": { "const": "user.action" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/overrides/tenant-b/user.action" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tenant_id": { "const": "tenant-c" }, "event_type": { "const": "webhook.dispatched" }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/overrides/tenant-c/webhook.dispatched" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "defaults": {
+      "monitoring.alert": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "source":   { "type": "string" },
+          "message":  { "type": "string" }
+        },
+        "required": ["severity", "message"]
+      },
+      "monitoring.metric": {
+        "type": "object",
+        "properties": {
+          "metric_name": { "type": "string" },
+          "value":       { "type": "number" },
+          "unit":        { "type": "string" }
+        },
+        "required": ["metric_name", "value"]
+      },
+      "user.action": {
+        "type": "object",
+        "properties": {
+          "action":   { "type": "string" },
+          "user_id":  { "type": "string" },
+          "resource": { "type": "string" }
+        },
+        "required": ["action", "user_id"]
+      },
+      "transaction.auth": {
+        "type": "object",
+        "properties": {
+          "transaction_id": { "type": "string" },
+          "amount":         { "type": "number" },
+          "currency":       { "type": "string" },
+          "status":         { "type": "string", "enum": ["approved", "denied", "pending"] }
+        },
+        "required": ["transaction_id", "amount", "status"]
+      },
+      "webhook.dispatched": {
+        "type": "object",
+        "properties": {
+          "webhook_id":  { "type": "string" },
+          "endpoint":    { "type": "string", "format": "uri" },
+          "http_status": { "type": "integer" }
+        },
+        "required": ["webhook_id", "endpoint"]
+      }
+    },
+    "overrides": {
+      "tenant-a": {
+        "monitoring.alert": {
+          "type": "object",
+          "properties": {
+            "severity":  { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+            "source":    { "type": "string" },
+            "message":   { "type": "string" },
+            "alert_url": { "type": "string", "format": "uri" }
+          },
+          "required": ["severity", "source", "message"]
+        },
+        "transaction.auth": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string" },
+            "amount":         { "type": "number" },
+            "currency":       { "type": "string" },
+            "status":         { "type": "string", "enum": ["approved", "denied", "pending"] },
+            "risk_score":     { "type": "number" }
+          },
+          "required": ["transaction_id", "amount", "currency", "status"]
+        }
+      },
+      "tenant-b": {
+        "user.action": {
+          "type": "object",
+          "properties": {
+            "action":     { "type": "string" },
+            "user_id":    { "type": "string" },
+            "resource":   { "type": "string" },
+            "session_id": { "type": "string" }
+          },
+          "required": ["action", "user_id", "resource", "session_id"]
+        }
+      },
+      "tenant-c": {
+        "webhook.dispatched": {
+          "type": "object",
+          "properties": {
+            "webhook_id":  { "type": "string" },
+            "endpoint":    { "type": "string", "format": "uri" },
+            "http_status": { "type": "integer" },
+            "callback_id": { "type": "string" }
+          },
+          "required": ["webhook_id", "endpoint", "http_status", "callback_id"]
+        }
+      }
+    }
+  }
+}
