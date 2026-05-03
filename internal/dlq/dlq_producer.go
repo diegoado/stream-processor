@@ -10,20 +10,25 @@ import (
 	"github.com/diegoado/stream-processor/pkg/logger"
 )
 
-// Producer sends invalid events to the Kafka dead-letter topic.
-type Producer struct {
+// Producer sends invalid events to the DLQ.
+type Producer interface {
+	Send(ctx context.Context, original event.Event, errors []string) error
+	Close()
+}
+
+type producerImpl struct {
 	log      *slog.Logger
 	producer kafka.Producer[event.RejectedEvent]
 	topic    string
 }
 
 // NewProducer creates a DLQ Producer with the given sync Kafka producer and topic.
-func NewProducer(producer kafka.Producer[event.RejectedEvent], topic string) *Producer {
-	return &Producer{log: logger.Get("dlq-producer"), producer: producer, topic: topic}
+func NewProducer(producer kafka.Producer[event.RejectedEvent], topic string) Producer {
+	return &producerImpl{log: logger.Get("dlq-producer"), producer: producer, topic: topic}
 }
 
 // Send produces a rejected event envelope to the DLQ topic.
-func (p *Producer) Send(ctx context.Context, original event.Event, errors []string) error {
+func (p *producerImpl) Send(ctx context.Context, original event.Event, errors []string) error {
 	err := p.producer.Produce(ctx, kafka.ProducerMessage[event.RejectedEvent]{
 		Topic: p.topic,
 		Value: event.RejectedEvent{
@@ -39,7 +44,7 @@ func (p *Producer) Send(ctx context.Context, original event.Event, errors []stri
 }
 
 // Close flushes and closes the underlying Kafka producer.
-func (p *Producer) Close() {
+func (p *producerImpl) Close() {
 	p.producer.Flush()
 	p.producer.Close()
 }

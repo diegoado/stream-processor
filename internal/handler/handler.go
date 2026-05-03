@@ -12,20 +12,24 @@ import (
 )
 
 // Handler orchestrates event validation, sanitization, and routing.
-type Handler struct {
-	log         *slog.Logger
-	validator   *schema.Validator
-	publisher   *publisher.Publisher
-	dlqProducer *dlq.Producer
+type Handler interface {
+	Handle(ctx context.Context, evt event.Event) error
+}
+
+type handlerImpl struct {
+	log       *slog.Logger
+	validator schema.Validator
+	publisher publisher.Publisher
+	rejecter  dlq.Producer
 }
 
 // NewHandler creates a Handler with the given dependencies.
-func NewHandler(validator *schema.Validator, publisher *publisher.Publisher, dlqProducer *dlq.Producer) *Handler {
-	return &Handler{log: logger.Get("handler"), validator: validator, publisher: publisher, dlqProducer: dlqProducer}
+func NewHandler(validator schema.Validator, publisher publisher.Publisher, rejecter dlq.Producer) Handler {
+	return &handlerImpl{log: logger.Get("handler"), validator: validator, publisher: publisher, rejecter: rejecter}
 }
 
 // Handle validates an event, sanitizes its payload if valid and publishes to SNS, or rejects to DLQ.
-func (h *Handler) Handle(ctx context.Context, evt event.Event) error {
+func (h *handlerImpl) Handle(ctx context.Context, evt event.Event) error {
 	sanitized, errors, err := h.validator.ValidateAndSanitize(evt)
 	if err != nil {
 		return err
@@ -33,7 +37,7 @@ func (h *Handler) Handle(ctx context.Context, evt event.Event) error {
 
 	if len(errors) > 0 {
 		h.log.Warn("event rejected", slog.String("event_id", evt.EventID), slog.Any("errors", errors))
-		return h.dlqProducer.Send(ctx, evt, errors)
+		return h.rejecter.Send(ctx, evt, errors)
 	}
 
 	h.log.Info("event accepted", slog.String("event_id", evt.EventID), slog.String("tenant_id", evt.TenantID))

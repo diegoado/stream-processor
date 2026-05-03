@@ -1,0 +1,6 @@
+cmd/producer
+cmd/sender
+cmd/processor
+pkg/config
+pkg/logger
+pkg/event

@@ -1,3 +1,5 @@
+//go:build sender
+
 package aws
 
 import (

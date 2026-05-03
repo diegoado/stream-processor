@@ -215,8 +215,8 @@ stream-processor/
 │   │   └── event_rejection.feature     # Invalid event → DLQ scenarios
 │   ├── steps/
 │   │   ├── common.go                   # Shared step defs + ScenarioCtx
-│   │   ├── processing.go              # Valid event processing steps
-│   │   └── rejection.go               # Invalid event rejection steps
+│   │   ├── processing.go               # Valid event processing steps
+│   │   └── rejection.go                # Invalid event rejection steps
 │   └── testsuite/
 │       ├── suite.go                    # SuiteClient (Kafka, SQS, S3 test clients)
 │       ├── infra.go                    # Init: set env vars from container endpoints
@@ -238,9 +238,17 @@ stream-processor/
 │   ├── integration-test.sh
 │   ├── format.sh
 │   └── install.sh
-├── docker-compose.yml             # Kafka + LocalStack + producer + senders
-├── localstack/
-│   └── init-aws.sh                # Creates SNS, SQS, S3, subscriptions, uploads schema
+├── docker-compose.yml             # Kafka + LocalStack + processor + producer + senders
+├── Dockerfile                     # Processor Dockerfile
+├── dockerfiles/
+│   ├── producer/Dockerfile        # Mock producer Dockerfile
+│   ├── sender/Dockerfile          # Mock sender Dockerfile
+│   └── scripts/
+│       ├── kafka/
+│       │   ├── create-topics.sh   # Topic creation script
+│       │   └── topics.txt         # Topic names
+│       └── localstack/
+│           └── init-aws.sh        # Creates SNS, SQS, S3, subscriptions, uploads schema
 ├── Makefile
 ├── .golangci.yml
 ├── .editorconfig
@@ -327,249 +335,84 @@ Pure shell approach:
 ### 7.1 Unit Tests
 
 - **Framework**: `testify` (assert + mock)
-- **Pattern**: interface-driven with two constructors (production + test)
-- **Coverage minimum**: 79%
+- **Pattern**: interface-driven — all dependencies are interfaces with private concrete implementations, mocks defined in `mock_provider_test.go` per package
+- **Test style**: table-driven tests with `setup` closure, `suite` naming for SUT, following tracking-partition-manager patterns
+- **Coverage**: combined unit + integration ≥ 75%
 - **Test areas**:
-  - `handler`: validate → route logic with mocked dependencies
-  - `schema/loader`: S3 polling, ETag comparison, thread-safe schema swap
-  - `publisher/sns`: message attribute construction, error handling
-  - `dlq/producer`: DLQ envelope construction
+  - `handler`: validate → route logic with all 3 deps mocked (validator, publisher, rejecter)
+  - `schema/validator`: validate + sanitize with real schema, update/etag
+  - `schema/loader`: S3 polling, ETag comparison, auto-refresh with mocked S3 client
+  - `schema/data_schema`: payload field index defaults + overrides
+  - `publisher`: SNS publish with tenant_id attribute, error handling
+  - `dlq/producer`: DLQ envelope construction, send + close
+  - `consumer`: poll loop with mocked handler + kafka consumer
+  - `utilities/sanitize`: payload field filtering, immutability
 
 ### 7.2 Integration Tests (godog + testcontainers)
 
-Follows the exact same pattern as tracking-partition-manager.
-
-**Module structure**: separate `integration_test/` Go module with its own `go.mod`, referencing the main module via `replace` directive.
+Same Go module with `//go:build integration` tag. Run with `make integration-test`.
 
 **Infrastructure** (`integration_test/testsuite/containers/`):
+- Kafka via `testcontainers-go/modules/kafka` (KRaft mode, `confluent-local:7.6.0`)
+- LocalStack with init script (S3 bucket + schema upload + SNS topic + test SQS queue subscribed to SNS)
+- Topics `events` and `events.dlq` pre-created via Kafka admin API
 
-```go
-// containers.go
-type Infrastructure struct {
-    network    *testcontainers.DockerNetwork
-    LocalStack *localstack.LocalStackContainer
-    Kafka      testcontainers.Container
-    Zookeeper  testcontainers.Container
-}
+**Entrypoint** starts the real processor in a background goroutine, waits for consumer group rebalance, then runs godog test suites.
 
-func Setup(ctx context.Context) (*Infrastructure, error) { ... }
-func (i *Infrastructure) Teardown(ctx context.Context)    { ... }
-func (i *Infrastructure) KafkaBroker(ctx context.Context) (string, error)       { ... }
-func (i *Infrastructure) LocalStackEndpoint(ctx context.Context) (string, error) { ... }
-```
+**Suite client** provides Kafka producer, Kafka consumer (unique group per instance), and SQS client for verifying SNS delivery via test queue.
 
-- Docker network shared between containers
-- LocalStack: SNS, SQS, S3 (with init script that creates resources + uploads schema)
-- Kafka + Zookeeper: topics `events` and `events.dlq` auto-created
+**Feature files**:
+- `event_processing.feature`: Scenario Outline with default schemas (5 event types) + tenant-specific overrides (4 combinations) + extra field sanitization — verifies events arrive in SNS by polling test SQS queue and matching `event_id`
+- `event_rejection.feature`: missing field, bad timestamp, empty payload — verifies events appear in DLQ Kafka topic with expected error messages
 
-**Entrypoint** (`integration_test/entrypoint_integration_test.go`):
+**Steps**:
+- `common.go`: shared `ScenarioCtx` with Given (parse JSON payload) + When (produce to topic)
+- `processing.go`: `ProcessingScenarioCtx` — Then verifies event received in SNS, matches `event_id`
+- `rejection.go`: `RejectionScenarioCtx` — Then verifies DLQ message exists, checks error array contains expected string
 
-```go
-func TestMain(m *testing.M) {
-    ctx := context.Background()
-    infra, err := containers.Setup(ctx)
-    if err != nil {
-        panic(fmt.Errorf("failed to setup infrastructure: %w", err))
-    }
-    testsuite.Init(infra)
-    exitCode := m.Run()
-    infra.Teardown(ctx)
-    os.Exit(exitCode)
-}
-```
+### 7.3 Coverage
 
-**Suite client** (`integration_test/testsuite/suite.go`):
-
-```go
-type SuiteClient struct {
-    KafkaProducer  *KafkaTestProducer   // produces test events to 'events' topic
-    KafkaConsumer  *KafkaTestConsumer   // reads from 'events.dlq' to verify rejections
-    SQS            *SQSTestClient       // reads from tenant queues to verify delivery
-    S3             *S3TestClient        // uploads/updates schema in S3
-}
-```
-
-**Feature files** (`integration_test/features/`):
-
-```gherkin
-# event_processing.feature
-Feature: Event processing
-  As the stream processor
-  I want to validate and route events to the correct tenant queue
-  So that each tenant receives only their events
-
-  Scenario Outline: Valid event is delivered to the correct tenant queue
-    Given a valid event for tenant "<tenant_id>" with type "<event_type>"
-    When the event is produced to the events topic
-    Then the event should be received in the "<tenant_id>-queue" SQS queue
-    And the event should not appear in the DLQ topic
-
-    Examples:
-      | tenant_id | event_type        |
-      | tenant-a  | monitoring.alert  |
-      | tenant-b  | user.action       |
-      | tenant-c  | transaction.auth  |
-
-  Scenario: Events from different tenants are routed to their respective queues
-    Given valid events for tenants "tenant-a" and "tenant-b"
-    When the events are produced to the events topic
-    Then tenant-a's event should be in "tenant-a-queue"
-    And tenant-b's event should be in "tenant-b-queue"
-```
-
-```gherkin
-# event_rejection.feature
-Feature: Event rejection
-  As the stream processor
-  I want to reject invalid events to a dead-letter queue
-  So that malformed events are flagged without blocking processing
-
-  Scenario: Event missing required field is rejected
-    Given an event without the "tenant_id" field
-    When the event is produced to the events topic
-    Then the event should appear in the DLQ topic
-    And the DLQ message should contain error "tenant_id is required"
-    And the event should not be in any SQS queue
-
-  Scenario: Event with invalid timestamp format is rejected
-    Given an event with timestamp "not-a-date"
-    When the event is produced to the events topic
-    Then the event should appear in the DLQ topic
-    And the DLQ message should contain error "Does not match format 'date-time'"
-
-  Scenario: Event with extra fields is sanitized and delivered
-    Given a valid event for tenant "tenant-a" with an extra field "unexpected_field"
-    When the event is produced to the events topic
-    Then the event should be received in the "tenant-a-queue" SQS queue
-    And the delivered event should not contain the field "unexpected_field"
-```
-
-**Step definitions** (`integration_test/steps/`):
-
-- `common.go`: `ScenarioCtx` struct holding `*testsuite.SuiteClient`, shared Given/Then steps, `After` hook for cleanup
-- `processing.go`: `InitializeProcessingScenario` — steps for valid event flow
-- `rejection.go`: `InitializeRejectionScenario` — steps for invalid event flow
-
-**Test runner** (`integration_test/cucumber_integration_test.go`):
-
-```go
-func TestEventProcessing(t *testing.T) {
-    suite := godog.TestSuite{
-        ScenarioInitializer: steps.InitializeProcessingScenario,
-        Options: &godog.Options{
-            Format:   "pretty",
-            Paths:    []string{"features/event_processing.feature"},
-            TestingT: t,
-        },
-    }
-    if suite.Run() != 0 {
-        t.Fatal("failed to run event processing feature tests")
-    }
-}
-
-func TestEventRejection(t *testing.T) {
-    suite := godog.TestSuite{
-        ScenarioInitializer: steps.InitializeRejectionScenario,
-        Options: &godog.Options{
-            Format:   "pretty",
-            Paths:    []string{"features/event_rejection.feature"},
-            TestingT: t,
-        },
-    }
-    if suite.Run() != 0 {
-        t.Fatal("failed to run event rejection feature tests")
-    }
-}
-```
-
-**Key godog dependencies**:
-
-| Library                                                       | Purpose               |
-|---------------------------------------------------------------|-----------------------|
-| `cucumber/godog` v0.15.1                                      | BDD test framework    |
-| `testcontainers/testcontainers-go` v0.41.0                    | Container lifecycle   |
-| `testcontainers/testcontainers-go/modules/localstack` v0.41.0 | LocalStack module     |
-| `rdumont/assistdog`                                           | Table parsing helpers |
+- Unit + integration coverage merged via `scripts/coverage.sh`
+- `.coverageignore` excludes: `cmd/producer`, `cmd/sender`, `cmd/processor`, `pkg/config`, `pkg/logger`, `pkg/event`
+- `pkg/aws/sqs.go` excluded via `//go:build sender` tag (only used by mock sender)
+- Minimum threshold: 75%
 | `stretchr/testify`                                            | Assertions            |
 
 ## 8. Docker Compose (Local Environment)
 
-```yaml
-services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.9.0
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
+- **Healthchecks**: broker uses `kafka-broker-api-versions`, localstack uses `awslocal s3 ls`
+- **init-broker**: waits for broker to be healthy, then creates topics from `dockerfiles/scripts/kafka/topics.txt`
+- **Dependency ordering**: `broker healthy` → `init-broker completed` → `processor + producer start`; `localstack healthy` → `processor + senders start`
+- **Network**: all services on `stream-processor` bridge network
+- **Dockerfiles**: `Dockerfile` (processor), `dockerfiles/producer/Dockerfile`, `dockerfiles/sender/Dockerfile` — all use `golang:1.25-alpine` + `build-base` + `-tags musl` for confluent-kafka-go compatibility
+- **AWS credentials**: dummy `AWS_ACCESS_KEY_ID=test` / `AWS_SECRET_ACCESS_KEY=test` for LocalStack
 
-  kafka:
-    image: confluentinc/cp-kafka:7.9.0
-    depends_on: [zookeeper]
-    ports: ["9092:9092"]
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+### 8.1 LocalStack Init Script (`dockerfiles/scripts/localstack/init-aws.sh`)
 
-  localstack:
-    image: localstack/localstack:4.4.0
-    ports: ["4566:4566"]
-    environment:
-      SERVICES: sns,sqs,s3
-      DEFAULT_REGION: us-east-1
-    volumes:
-      - ./localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
-      - ./schemas:/tmp/schemas
-
-  processor:
-    build: { context: ., dockerfile: Dockerfile, target: processor }
-    depends_on: [kafka, localstack]
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      AWS_ENDPOINT: http://localstack:4566
-
-  producer:
-    build: { context: ., dockerfile: Dockerfile, target: producer }
-    depends_on: [kafka]
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-
-  sender-tenant-a:
-    build: { context: ., dockerfile: Dockerfile, target: sender }
-    depends_on: [localstack]
-    environment:
-      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-a-queue
-      AWS_ENDPOINT: http://localstack:4566
-      TENANT_ID: tenant-a
-
-  sender-tenant-b:
-    build: { context: ., dockerfile: Dockerfile, target: sender }
-    depends_on: [localstack]
-    environment:
-      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-b-queue
-      AWS_ENDPOINT: http://localstack:4566
-      TENANT_ID: tenant-b
-```
-
-### 8.1 LocalStack Init Script (`localstack/init-aws.sh`)
-
-1. Create S3 bucket `stream-processor-schemas`
+1. Create S3 bucket `stream-processor`
 2. Upload `schemas/event_schema.json` to S3
 3. Create SNS topic `events-topic`
 4. Create SQS queues: `tenant-a-queue`, `tenant-b-queue`, `tenant-c-queue`
 5. Subscribe each queue to SNS with filter policy `{"tenant_id": ["tenant-a"]}` etc.
 
+### 8.2 Kafka Topic Init Script (`dockerfiles/scripts/kafka/create-topics.sh`)
+
+Reads topic names from `topics.txt` and creates them via `kafka-topics --create`.
+
 ## 9. Key Libraries
 
-| Library                              | Version  | Purpose                                     |
-|--------------------------------------|----------|---------------------------------------------|
-| `confluentinc/confluent-kafka-go/v2` | v2.12.0  | Kafka consumer + DLQ producer               |
-| `xeipuuv/gojsonschema`               | v1.2.0   | JSON Schema validation                      |
-| `aws-sdk-go-v2`                      | latest   | SNS publish, SQS receive, S3 schema loading |
-| `caarlos0/env/v10`                   | v10.0.0  | Environment-based configuration             |
-| `stretchr/testify`                   | v1.9.0   | Unit test assertions + mocks                |
-| `log/slog` (stdlib)                  | —        | Structured logging (JSON prod / text dev)   |
+| Library                               | Version  | Purpose                                     |
+|---------------------------------------|----------|---------------------------------------------|
+| `confluentinc/confluent-kafka-go/v2`  | v2.12.0  | Kafka consumer + DLQ producer               |
+| `xeipuuv/gojsonschema`                | v1.2.0   | JSON Schema validation                      |
+| `aws-sdk-go-v2`                       | latest   | SNS publish, SQS receive, S3 schema loading |
+| `caarlos0/env/v10`                    | v10.0.0  | Environment-based configuration             |
+| `stretchr/testify`                    | v1.9.0   | Unit test assertions + mocks                |
+| `cucumber/godog`                      | v0.15.1  | BDD integration test framework              |
+| `testcontainers/testcontainers-go`    | v0.42.0  | Container lifecycle for integration tests   |
+| `google/uuid`                         | latest   | UUID generation for mock producer           |
+| `pkg/errors`                          | latest   | Error formatting                            |
+| `log/slog` (stdlib)                   | —        | Structured logging (JSON prod / text dev)   |
 
 ## 10. Graceful Shutdown
 

@@ -10,8 +10,14 @@ import (
 	"github.com/diegoado/stream-processor/pkg/utilities"
 )
 
-// Validator performs thread-safe JSON Schema validation.
-type Validator struct {
+// Validator validates and sanitizes events.
+type Validator interface {
+	ValidateAndSanitize(evt event.Event) (*event.Event, []string, error)
+	Update(data []byte, etag string) error
+	ETag() string
+}
+
+type validatorImpl struct {
 	mu         sync.RWMutex
 	schema     *gojsonschema.Schema
 	dataSchema *DataSchema
@@ -19,7 +25,7 @@ type Validator struct {
 }
 
 // NewValidator compiles a JSON Schema from raw bytes and creates a Validator.
-func NewValidator(data []byte, etag string) (*Validator, error) {
+func NewValidator(data []byte, etag string) (Validator, error) {
 	s, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(data))
 	if err != nil {
 		return nil, err
@@ -28,16 +34,11 @@ func NewValidator(data []byte, etag string) (*Validator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Validator{schema: s, dataSchema: ds, etag: etag}, nil
+	return &validatorImpl{schema: s, dataSchema: ds, etag: etag}, nil
 }
 
-// NewValidatorWith creates a Validator from a pre-compiled schema (for testing).
-func NewValidatorWith(schema *gojsonschema.Schema) *Validator {
-	return &Validator{schema: schema}
-}
-
-// Validate validates an event against the current schema.
-func (v *Validator) Validate(evt event.Event) ([]string, error) {
+// validate validates an event against the current schema.
+func (v *validatorImpl) validate(evt event.Event) ([]string, error) {
 	raw, err := json.Marshal(evt)
 	if err != nil {
 		return nil, err
@@ -59,8 +60,8 @@ func (v *Validator) Validate(evt event.Event) ([]string, error) {
 }
 
 // ValidateAndSanitize validates an event and, if valid, returns a sanitized copy with extra payload fields removed.
-func (v *Validator) ValidateAndSanitize(evt event.Event) (*event.Event, []string, error) {
-	errors, err := v.Validate(evt)
+func (v *validatorImpl) ValidateAndSanitize(evt event.Event) (*event.Event, []string, error) {
+	errors, err := v.validate(evt)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,7 +75,7 @@ func (v *Validator) ValidateAndSanitize(evt event.Event) (*event.Event, []string
 }
 
 // Update replaces the schema with a newly compiled one. Thread-safe.
-func (v *Validator) Update(data []byte, etag string) error {
+func (v *validatorImpl) Update(data []byte, etag string) error {
 	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(data))
 	if err != nil {
 		return err
@@ -94,6 +95,6 @@ func (v *Validator) Update(data []byte, etag string) error {
 }
 
 // ETag returns the current schema ETag. Thread-safe.
-func (v *Validator) ETag() string {
+func (v *validatorImpl) ETag() string {
 	return v.etag
 }

@@ -12,10 +12,14 @@ import (
 )
 
 // Consumer polls Kafka for events and delegates processing to the handler.
-type Consumer struct {
+type Consumer interface {
+	Start(ctx context.Context) error
+}
+
+type consumerImpl struct {
 	log         *slog.Logger
 	consumer    kafka.Consumer[event.Event]
-	handler     *handler.Handler
+	handler     handler.Handler
 	topic       string
 	pollTimeout time.Duration
 }
@@ -23,11 +27,11 @@ type Consumer struct {
 // NewConsumer creates a Consumer with the given Kafka consumer, handler, and configuration.
 func NewConsumer(
 	consumer kafka.Consumer[event.Event],
-	handler *handler.Handler,
+	handler handler.Handler,
 	eventsTopic string,
 	pollTimeout time.Duration,
-) *Consumer {
-	return &Consumer{
+) Consumer {
+	return &consumerImpl{
 		log:         logger.Get("processor-consumer"),
 		consumer:    consumer,
 		handler:     handler,
@@ -37,7 +41,7 @@ func NewConsumer(
 }
 
 // Start subscribes to the topic and polls in a loop until the context is cancelled.
-func (c *Consumer) Start(ctx context.Context) error {
+func (c *consumerImpl) Start(ctx context.Context) error {
 	if err := c.consumer.Subscribe(c.topic); err != nil {
 		return err
 	}
@@ -56,7 +60,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	}
 }
 
-func (c *Consumer) poll(ctx context.Context) error {
+func (c *consumerImpl) poll(ctx context.Context) error {
 	msg, err := c.consumer.Poll(c.pollTimeout)
 	if err != nil {
 		return err

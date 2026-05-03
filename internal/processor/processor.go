@@ -17,18 +17,22 @@ import (
 )
 
 // Processor wires and runs the stream processing pipeline.
-type Processor struct {
+type Processor interface {
+	Start(ctx context.Context) error
+}
+
+type processorImpl struct {
 	log *slog.Logger
 	cfg *config.Config
 }
 
 // NewProcessor creates a Processor from the given configuration.
-func NewProcessor(cfg *config.Config) *Processor {
-	return &Processor{log: logger.Get("stream-processor"), cfg: cfg}
+func NewProcessor(cfg *config.Config) Processor {
+	return &processorImpl{log: logger.Get("stream-processor"), cfg: cfg}
 }
 
 // Start initializes all components and runs the consumer loop until the context is cancelled.
-func (p *Processor) Start(ctx context.Context) error {
+func (p *processorImpl) Start(ctx context.Context) error {
 	schemaLoadCancelFunc, schemaValidator := p.initSchemaLoaderAndValidator(ctx)
 	snsPublisher := p.initSnsPublisher(ctx)
 	dlqProducer := p.initDlqProducer()
@@ -56,12 +60,12 @@ func (p *Processor) Start(ctx context.Context) error {
 	}()
 
 	p.log.Info("stream processor starting")
-	err := eventConsumer.Start(ctx)
-
-	return err
+	return eventConsumer.Start(ctx)
 }
 
-func (p *Processor) initSchemaLoaderAndValidator(ctx context.Context) (context.CancelFunc, *schema.Validator) {
+func (p *processorImpl) initSchemaLoaderAndValidator(
+	ctx context.Context,
+) (context.CancelFunc, schema.Validator) {
 	s3Client, err := aws.NewS3Client(ctx, p.cfg.AWS)
 	if err != nil {
 		p.log.Error("failed to create S3 client", slog.Any("error", err))
@@ -87,7 +91,7 @@ func (p *Processor) initSchemaLoaderAndValidator(ctx context.Context) (context.C
 	return schemaLoadCancel, validator
 }
 
-func (p *Processor) initSnsPublisher(ctx context.Context) *publisher.Publisher {
+func (p *processorImpl) initSnsPublisher(ctx context.Context) publisher.Publisher {
 	snsClient, err := aws.NewSNSClient(ctx, p.cfg.AWS)
 	if err != nil {
 		p.log.Error("failed to create SNS client", slog.Any("error", err))
@@ -96,7 +100,7 @@ func (p *Processor) initSnsPublisher(ctx context.Context) *publisher.Publisher {
 	return publisher.NewPublisher(snsClient, p.cfg.Processor.AcceptedEventsTopic)
 }
 
-func (p *Processor) initDlqProducer() *dlq.Producer {
+func (p *processorImpl) initDlqProducer() dlq.Producer {
 	kafkaProducer, err := kafka.NewSyncProducer[event.RejectedEvent](p.cfg.Kafka)
 	if err != nil {
 		p.log.Error("failed to create DLQ producer", slog.Any("error", err))
@@ -105,7 +109,7 @@ func (p *Processor) initDlqProducer() *dlq.Producer {
 	return dlq.NewProducer(kafkaProducer, p.cfg.Processor.RejectedEventsTopic)
 }
 
-func (p *Processor) initKafkaConsumer() kafka.Consumer[event.Event] {
+func (p *processorImpl) initKafkaConsumer() kafka.Consumer[event.Event] {
 	kafkaConsumer, err := kafka.NewConsumer[event.Event](p.cfg.Kafka)
 	if err != nil {
 		p.log.Error("failed to create Kafka consumer", slog.Any("error", err))

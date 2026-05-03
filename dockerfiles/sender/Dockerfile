@@ -8,7 +8,7 @@ COPY . .
 RUN go mod download
 
 #https://github.com/confluentinc/confluent-kafka-go#librdkafka
-RUN go build -tags musl -o /bin/sender ./cmd/sender
+RUN go build -tags musl,sender -o /bin/sender ./cmd/sender
 
 FROM alpine:3.21
 

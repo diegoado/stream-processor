@@ -10,19 +10,23 @@ import (
 )
 
 // Publisher publishes valid events to an SNS topic with tenant routing.
-type Publisher struct {
+type Publisher interface {
+	Publish(ctx context.Context, evt *event.Event) error
+}
+
+type publisherImpl struct {
 	log      *slog.Logger
 	client   aws.SNSClient
 	topicARN string
 }
 
 // NewPublisher creates a Publisher with the given SNS client and topic ARN.
-func NewPublisher(client aws.SNSClient, topicARN string) *Publisher {
-	return &Publisher{log: logger.Get("sns-publisher"), client: client, topicARN: topicARN}
+func NewPublisher(client aws.SNSClient, topicARN string) Publisher {
+	return &publisherImpl{log: logger.Get("sns-publisher"), client: client, topicARN: topicARN}
 }
 
 // Publish sends an event to SNS with tenant_id as a message attribute.
-func (p *Publisher) Publish(ctx context.Context, evt *event.Event) error {
+func (p *publisherImpl) Publish(ctx context.Context, evt *event.Event) error {
 	err := p.client.Publish(ctx, p.topicARN, evt, map[string]string{
 		"tenant_id": evt.TenantID,
 	})
