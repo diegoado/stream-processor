@@ -7,6 +7,7 @@ import (
 	awsSDK "github.com/aws/aws-sdk-go-v2/aws"
 	awsCfg "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 
 	"github.com/diegoado/stream-processor/pkg/config"
 )
@@ -38,6 +39,8 @@ func NewS3Client(ctx context.Context, cfg config.AWSConfig) (S3Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	otelaws.AppendMiddlewares(&s3Cfg.APIOptions)
 
 	client := s3.NewFromConfig(s3Cfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {

@@ -37,3 +37,9 @@ local-up: ## Start docker-compose (Kafka + LocalStack + mock services)
 
 local-down: ## Stop docker-compose
 	docker compose down
+
+otel-up: ## Start local environment with OpenTelemetry + Grafana stack
+	docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d
+
+otel-down: ## Stop local environment with OpenTelemetry + Grafana stack
+	docker compose -f docker-compose.yml -f docker-compose.otel.yml down

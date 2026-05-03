@@ -6,6 +6,8 @@ import (
 
 	confluent "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
+	"github.com/jurabek/otelkafka"
+
 	"github.com/diegoado/stream-processor/pkg/config"
 )
 
@@ -23,13 +25,13 @@ type Consumer[T any] interface {
 }
 
 type consumerImpl[T any] struct {
-	consumer *confluent.Consumer
+	consumer *otelkafka.Consumer
 	lastMsg  *confluent.Message
 }
 
 // NewConsumer creates a production Kafka Consumer from configuration.
 func NewConsumer[T any](cfg config.KafkaConfig) (Consumer[T], error) {
-	c, err := confluent.NewConsumer(&confluent.ConfigMap{
+	c, err := otelkafka.NewConsumer(&confluent.ConfigMap{
 		"bootstrap.servers":         cfg.BootstrapServers,
 		"group.id":                  cfg.GroupID,
 		"auto.offset.reset":         cfg.Consumer.AutoOffsetReset,

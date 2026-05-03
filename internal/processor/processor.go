@@ -14,6 +14,7 @@ import (
 	"github.com/diegoado/stream-processor/pkg/event"
 	"github.com/diegoado/stream-processor/pkg/kafka"
 	"github.com/diegoado/stream-processor/pkg/logger"
+	"github.com/diegoado/stream-processor/pkg/telemetry"
 )
 
 // Processor wires and runs the stream processing pipeline.
@@ -33,6 +34,7 @@ func NewProcessor(cfg *config.Config) Processor {
 
 // Start initializes all components and runs the consumer loop until the context is cancelled.
 func (p *processorImpl) Start(ctx context.Context) error {
+	otelShutdown := p.initTelemetry(ctx)
 	schemaLoadCancelFunc, schemaValidator := p.initSchemaLoaderAndValidator(ctx)
 	snsPublisher := p.initSnsPublisher(ctx)
 	dlqProducer := p.initDlqProducer()
@@ -54,6 +56,9 @@ func (p *processorImpl) Start(ctx context.Context) error {
 		}
 		if dlqProducer != nil {
 			dlqProducer.Close()
+		}
+		if otelShutdown != nil {
+			_ = otelShutdown(ctx)
 		}
 
 		p.log.Info("shutdown complete")
@@ -116,4 +121,19 @@ func (p *processorImpl) initKafkaConsumer() kafka.Consumer[event.Event] {
 		panic(err)
 	}
 	return kafkaConsumer
+}
+
+func (p *processorImpl) initTelemetry(ctx context.Context) func(context.Context) error {
+	if !p.cfg.OTel.Enabled {
+		return nil
+	}
+
+	provider, err := telemetry.Setup(ctx, p.cfg.OTel)
+	if err != nil {
+		p.log.Error("failed to setup telemetry", slog.Any("error", err))
+		return nil
+	}
+
+	p.log.Info("telemetry initialized")
+	return provider.Shutdown
 }

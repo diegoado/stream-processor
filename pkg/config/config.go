@@ -8,6 +8,7 @@ type Config struct {
 	AWS       AWSConfig
 	Schema    SchemaConfig
 	Processor ProcessorConfig
+	OTel      OTelConfig
 }
 
 // Load parses environment variables into a Config struct.

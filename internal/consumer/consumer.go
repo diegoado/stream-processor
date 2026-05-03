@@ -24,7 +24,7 @@ type consumerImpl struct {
 	pollTimeout time.Duration
 }
 
-// NewConsumer creates a Consumer with the given Kafka consumer, handler, and configuration.
+// NewConsumer creates a Consumer with the given dependencies.
 func NewConsumer(
 	consumer kafka.Consumer[event.Event],
 	handler handler.Handler,

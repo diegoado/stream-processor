@@ -76,10 +76,10 @@ services:
       - HOSTNAME=localstack
       - LOCALSTACK_HOSTNAME=localstack
     healthcheck:
-      test: awslocal s3 ls
+      test: awslocal sqs get-queue-url --queue-name tenant-c-queue
       interval: 5s
       timeout: 10s
-      retries: 10
+      retries: 20
     volumes:
       - ./dockerfiles/scripts/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
       - ./schemas:/tmp/schemas

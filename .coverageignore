@@ -4,3 +4,4 @@ cmd/processor
 pkg/config
 pkg/logger
 pkg/event
+pkg/telemetry

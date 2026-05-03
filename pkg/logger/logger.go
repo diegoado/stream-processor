@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 )
 
 func init() {
@@ -23,6 +25,11 @@ func init() {
 // Get returns a named logger derived from the default slog instance.
 func Get(name string) *slog.Logger {
 	return slog.Default().With("name", name)
+}
+
+// SetOTelHandler adds the OpenTelemetry bridge alongside the existing handler.
+func SetOTelHandler(serviceName string) {
+	slog.SetDefault(slog.New(newCompositeHandler(slog.Default().Handler(), otelslog.NewHandler(serviceName))))
 }
 
 func isRemoveEnvironment() bool {

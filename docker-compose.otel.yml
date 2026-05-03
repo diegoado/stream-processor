@@ -1,0 +1,100 @@
+services:
+  processor:
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_LOG_LEVEL: debug
+      OTEL_SERVICE_NAME: stream-processor
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPERIMENTAL_EXPORTER_OTLP_RETRY_ENABLED: "true"
+      OTEL_RESOURCE_DISABLED_KEYS: "process.command_args,process.executable.path,process.pid,process.runtime.description,process.runtime.name,process.runtime.version"
+      OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION: BASE2_EXPONENTIAL_BUCKET_HISTOGRAM
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=stream-processor,deployment.environment=local"
+      OTEL_EXPORTER_OTLP_COMPRESSION: gzip
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_EXPORTER_OTLP_TIMEOUT: 5000
+      OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: cumulative
+      OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT: 4095
+      OTEL_ATTRIBUTE_COUNT_LIMIT: 64
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_METRIC_EXPORT_INTERVAL: 60000
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      OTEL_INSTRUMENTATION_MESSAGING_EXPERIMENTAL_RECEIVE_TELEMETRY_ENABLED: "true"
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.128.0
+    hostname: otel-collector
+    container_name: otel-collector
+    restart: always
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./dockerfiles/opentelemetry/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    depends_on:
+      - tempo
+      - loki
+      - mimir
+    networks:
+      - stream-processor
+
+  tempo:
+    image: grafana/tempo:2.8.0
+    hostname: tempo
+    container_name: tempo
+    command: ["-config.file=/etc/grafana-tempo.yaml"]
+    restart: always
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./dockerfiles/grafana/grafana-tempo.yaml:/etc/grafana-tempo.yaml
+    networks:
+      - stream-processor
+
+  mimir:
+    image: grafana/mimir:2.16.0
+    hostname: mimir
+    container_name: mimir
+    command: ["-config.file=/etc/grafana-mimir.yaml", "-ingester.native-histograms-ingestion-enabled"]
+    restart: always
+    ports:
+      - "9009:9009"
+    volumes:
+      - ./dockerfiles/grafana/grafana-mimir.yaml:/etc/grafana-mimir.yaml
+    networks:
+      - stream-processor
+
+  loki:
+    image: grafana/loki:3.4.2
+    hostname: loki
+    container_name: loki
+    command: ["-config.file=/etc/grafana-loki.yaml"]
+    restart: always
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./dockerfiles/grafana/grafana-loki.yaml:/etc/grafana-loki.yaml
+    networks:
+      - stream-processor
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    hostname: grafana
+    container_name: grafana
+    restart: always
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dockerfiles/grafana/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    depends_on:
+      - tempo
+      - loki
+      - mimir
+    networks:
+      - stream-processor

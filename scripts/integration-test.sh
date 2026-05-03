@@ -13,7 +13,7 @@ fi
 
 COVERPKGS=$(go list ./... | grep -vE "$EXCLUDE_PATTERN" | tr '\n' ',')
 
-cd "$INTEGRATION_TEST_MODULE_DIR" && go test -tags integration -race -p 1 -timeout 600s \
+cd "$INTEGRATION_TEST_MODULE_DIR" && go test -v -tags integration -race -p 1 -timeout 600s \
   -coverprofile="../$INTEGRATION_COVERAGE_FILE" \
   -covermode=atomic \
   -coverpkg="$COVERPKGS" \

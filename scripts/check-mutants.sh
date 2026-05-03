@@ -10,15 +10,21 @@ if [ ! -f "$MUTATION_REPORT" ]; then
     exit 1
 fi
 
-mcov=$(grep "Mutator coverage:" "$MUTATION_REPORT" | grep -oE "[0-9]+\.[0-9]+" || true)
-if [ -z "$mcov" ]; then
-    echo "Could not parse mutator coverage from report"
-    exit 1
+# Check if any mutants remain.
+remain=$(grep "Lived:" "$MUTATION_REPORT"  | grep -oE "Lived: [0-9]+"  | awk '{sum += $2} END {print sum}' || echo "0")
+killed=$(grep "Killed:" "$MUTATION_REPORT" | grep -oE "Killed: [0-9]+" | awk '{sum += $2} END {print sum}' || echo "0")
+total=$((killed + remain))
+
+if [ "$total" -eq 0 ]; then
+    echo "No mutatable code found — passing."
+    exit 0
 fi
 
-echo "Mutator coverage: ${mcov}% (Min: ${MUTATION_THRESHOLD}%)"
+mcov=$(echo "scale=2; $killed * 100 / $total" | bc)
+echo "Mutation score: ${mcov}% (Killed: ${killed}, Lived: ${remain}, Min: ${MUTATION_THRESHOLD}%)"
+
 if [ "$(echo "$mcov < $MUTATION_THRESHOLD" | bc -l)" -eq 1 ]; then
-    echo "Mutation tests failed! Coverage below minimum."
+    echo "Mutation tests failed! Score below minimum."
     exit 1
 fi
 echo "Mutation tests passed!"

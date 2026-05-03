@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	confluent "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/jurabek/otelkafka"
 	"github.com/pkg/errors"
 
 	"github.com/diegoado/stream-processor/pkg/config"
@@ -31,13 +32,13 @@ type Producer[T any] interface {
 }
 
 type producerImpl[T any] struct {
-	producer        *confluent.Producer
+	producer        *otelkafka.Producer
 	deliveryChannel chan confluent.Event
 	flushTimeout    int
 }
 
 func newProducer[T any](cfg config.KafkaConfig, ch chan confluent.Event) (Producer[T], error) {
-	p, err := confluent.NewProducer(&confluent.ConfigMap{
+	p, err := otelkafka.NewProducer(&confluent.ConfigMap{
 		"bootstrap.servers":          cfg.BootstrapServers,
 		"acks":                       cfg.Producer.Acks,
 		"compression.type":           cfg.Producer.CompressionType,

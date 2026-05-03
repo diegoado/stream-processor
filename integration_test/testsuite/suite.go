@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+
 	"github.com/diegoado/stream-processor/pkg/event"
 )
 

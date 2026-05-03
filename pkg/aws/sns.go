@@ -8,6 +8,7 @@ import (
 	awsCfg "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sns/types"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 
 	"github.com/diegoado/stream-processor/pkg/config"
 )
@@ -27,6 +28,8 @@ func NewSNSClient(ctx context.Context, cfg config.AWSConfig) (SNSClient, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	otelaws.AppendMiddlewares(&snsCfg.APIOptions)
 
 	client := sns.NewFromConfig(snsCfg, func(o *sns.Options) {
 		if cfg.Endpoint != "" {

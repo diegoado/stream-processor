@@ -199,11 +199,15 @@ stream-processor/
 │   │   ├── config.go              # Config wrapper + Load()
 │   │   ├── aws.go                 # AWSConfig
 │   │   ├── kafka.go               # KafkaConfig + producer/consumer tuning
+│   │   ├── otel.go                # OTelConfig (enabled, service name, endpoint)
 │   │   ├── processor.go           # ProcessorConfig (topics + poll timeout)
 │   │   └── schema.go              # SchemaConfig
 │   ├── event/event.go             # Event types + DLQ envelope
+│   ├── telemetry/telemetry.go     # OpenTelemetry SDK setup (traces + metrics + logs)
 │   ├── utilities/sanitize.go      # Payload sanitization
-│   └── logger/logger.go           # slog wrapper (JSON prod / text dev)
+│   └── logger/
+│       ├── logger.go              # slog wrapper (JSON prod / text dev) + OTel bridge
+│       └── composite_handler.go   # Composite handler: fans out to stdout + OTel
 ├── schemas/
 │   └── event_schema.json          # JSON Schema (uploaded to S3 by init script)
 ├── integration_test/
@@ -239,10 +243,18 @@ stream-processor/
 │   ├── format.sh
 │   └── install.sh
 ├── docker-compose.yml             # Kafka + LocalStack + processor + producer + senders
+├── docker-compose.otel.yml        # OTel override: Collector + Tempo + Mimir + Loki + Grafana
 ├── Dockerfile                     # Processor Dockerfile
 ├── dockerfiles/
 │   ├── producer/Dockerfile        # Mock producer Dockerfile
 │   ├── sender/Dockerfile          # Mock sender Dockerfile
+│   ├── opentelemetry/
+│   │   └── otel-collector-config.yaml  # OTel Collector pipeline config
+│   ├── grafana/
+│   │   ├── grafana-datasources.yaml    # Grafana provisioned datasources
+│   │   ├── grafana-tempo.yaml          # Tempo config (OTLP receiver)
+│   │   ├── grafana-mimir.yaml          # Mimir config
+│   │   └── grafana-loki.yaml           # Loki config (OTLP ingestion)
 │   └── scripts/
 │       ├── kafka/
 │       │   ├── create-topics.sh   # Topic creation script
@@ -264,7 +276,7 @@ stream-processor/
 Follows tracking-partition-manager pattern — all targets delegate to `scripts/`:
 
 ```makefile
-.PHONY: help install format lint test test-all coverage mutation-test check-mutants integration-test ci local-up local-down
+.PHONY: help install format lint test test-all coverage mutation-test check-mutants integration-test ci local-up local-down otel-up otel-down
 
 help:             ## Show command list
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -303,6 +315,12 @@ local-up:         ## Start docker-compose (Kafka + LocalStack + mock services)
 
 local-down:       ## Stop docker-compose
 	docker compose down
+
+otel-up:          ## Start local environment with OpenTelemetry + Grafana stack
+	docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d
+
+otel-down:        ## Stop local environment with OpenTelemetry + Grafana stack
+	docker compose -f docker-compose.yml -f docker-compose.otel.yml down
 ```
 
 ### 6.2 Git Hooks
@@ -336,7 +354,7 @@ Pure shell approach:
 
 - **Framework**: `testify` (assert + mock)
 - **Pattern**: interface-driven — all dependencies are interfaces with private concrete implementations, mocks defined in `mock_provider_test.go` per package
-- **Test style**: table-driven tests with `setup` closure, `suite` naming for SUT, following tracking-partition-manager patterns
+- **Test style**: table-driven tests with `setup` closure, `suite` naming for SUT
 - **Coverage**: combined unit + integration ≥ 75%
 - **Test areas**:
   - `handler`: validate → route logic with all 3 deps mocked (validator, publisher, rejecter)
@@ -353,7 +371,7 @@ Pure shell approach:
 Same Go module with `//go:build integration` tag. Run with `make integration-test`.
 
 **Infrastructure** (`integration_test/testsuite/containers/`):
-- Kafka via `testcontainers-go/modules/kafka` (KRaft mode, `confluent-local:7.6.0`)
+- Kafka via `testcontainers-go/modules/kafka` (KRaft mode, `confluent-local:7.9.6`)
 - LocalStack with init script (S3 bucket + schema upload + SNS topic + test SQS queue subscribed to SNS)
 - Topics `events` and `events.dlq` pre-created via Kafka admin API
 
@@ -401,18 +419,23 @@ Reads topic names from `topics.txt` and creates them via `kafka-topics --create`
 
 ## 9. Key Libraries
 
-| Library                               | Version  | Purpose                                     |
-|---------------------------------------|----------|---------------------------------------------|
-| `confluentinc/confluent-kafka-go/v2`  | v2.12.0  | Kafka consumer + DLQ producer               |
-| `xeipuuv/gojsonschema`                | v1.2.0   | JSON Schema validation                      |
-| `aws-sdk-go-v2`                       | latest   | SNS publish, SQS receive, S3 schema loading |
-| `caarlos0/env/v10`                    | v10.0.0  | Environment-based configuration             |
-| `stretchr/testify`                    | v1.9.0   | Unit test assertions + mocks                |
-| `cucumber/godog`                      | v0.15.1  | BDD integration test framework              |
-| `testcontainers/testcontainers-go`    | v0.42.0  | Container lifecycle for integration tests   |
-| `google/uuid`                         | latest   | UUID generation for mock producer           |
-| `pkg/errors`                          | latest   | Error formatting                            |
-| `log/slog` (stdlib)                   | —        | Structured logging (JSON prod / text dev)   |
+| Library                                            | Version  | Purpose                                        |
+|----------------------------------------------------|----------|------------------------------------------------|
+| `confluentinc/confluent-kafka-go/v2`               | v2.12.0  | Kafka consumer + DLQ producer                  |
+| `jurabek/otelkafka`                                | v1.0.1   | OTel instrumentation for confluent-kafka-go    |
+| `xeipuuv/gojsonschema`                             | v1.2.0   | JSON Schema validation                         |
+| `aws-sdk-go-v2`                                    | latest   | SNS publish, SQS receive, S3 schema loading    |
+| `otelaws`                                          | latest   | OTel instrumentation for AWS SDK v2            |
+| `caarlos0/env/v10`                                 | v10.0.0  | Environment-based configuration                |
+| `stretchr/testify`                                 | v1.9.0   | Unit test assertions + mocks                   |
+| `cucumber/godog`                                   | v0.15.1  | BDD integration test framework                 |
+| `testcontainers/testcontainers-go`                 | v0.42.0  | Container lifecycle for integration tests      |
+| `google/uuid`                                      | latest   | UUID generation for mock producer              |
+| `pkg/errors`                                       | latest   | Error formatting                               |
+| `log/slog` (stdlib)                                | —        | Structured logging (JSON prod / text dev)      |
+| `go.opentelemetry.io/otel`                         | latest   | OpenTelemetry SDK (traces, metrics, logs)      |
+| `otlptracehttp` / `otlpmetrichttp` / `otlploghttp` | latest   | OTLP HTTP exporters                            |
+| `otelslog`                                         | latest   | slog → OTel log bridge                         |
 
 ## 10. Graceful Shutdown
 
@@ -420,9 +443,35 @@ The processor handles `SIGINT`/`SIGTERM`:
 1. Stop Kafka consumer (close consumer, stop polling)
 2. Flush DLQ producer (wait for pending deliveries)
 3. Cancel schema refresh goroutine
-4. Exit cleanly
+4. Shutdown OTel providers (flush pending traces, metrics, logs)
+5. Exit cleanly
 
-## 11. Implementation Phases
+## 11. Observability (OpenTelemetry)
+
+- **Traces**: OTLP HTTP exporter via `otlptracehttp`, Kafka spans via `otelkafka`, AWS spans via `otelaws`
+- **Metrics**: OTLP HTTP periodic reader via `otlpmetrichttp`
+- **Logs**: OTLP HTTP batch processor via `otlploghttp`, bridged from `slog` via `otelslog` multi-handler (stdout + OTel)
+- **slog bridge**: `logger.SetOTelHandler` wraps the existing stdout handler with the `otelslog` bridge using a `compositeHandler`, so all `slog` calls emit to both stdout and the OTel log pipeline. Called by `telemetry.Setup` after the logger provider is created.
+- **Kafka instrumentation**: `jurabek/otelkafka` wraps consumer + producer with automatic span creation and header propagation
+- **AWS instrumentation**: `otelaws.AppendMiddlewares` instruments all S3 and SNS API calls
+- **Disabled by default**: `OTEL_ENABLED=false` — noop tracers, zero overhead
+- **Config**: `OTEL_ENABLED`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+### 11.1 Local Grafana Stack (`make otel-up`)
+
+`docker-compose.otel.yml` is a multi-file override (`-f docker-compose.yml -f docker-compose.otel.yml`) that adds:
+
+| Service            | Image                                          | Port        | Purpose                             |
+|--------------------|------------------------------------------------|-------------|-------------------------------------|
+| `otel-collector`   | `otel/opentelemetry-collector-contrib:0.128.0` | 4317/4318   | OTLP receiver, routes to backends   |
+| `tempo`            | `grafana/tempo:2.8.0`                          | 3200        | Distributed tracing backend         |
+| `mimir`            | `grafana/mimir:2.16.0`                         | 9009        | Metrics backend (Prometheus API)    |
+| `loki`             | `grafana/loki:3.4.2`                           | 3100        | Log aggregation (native OTLP)       |
+| `grafana`          | `grafana/grafana:11.6.0`                       | 3000        | Dashboards (anonymous admin)        |
+
+The collector receives OTLP from the processor and fans out: traces → Tempo, metrics → Mimir, logs → Loki. Grafana is pre-provisioned with all three as datasources.
+
+## 12. Implementation Phases
 
 ### Phase 1: Project Scaffolding
 - Go module, Makefile, scripts, git hooks, .golangci.yml, .editorconfig, .gitignore
@@ -441,13 +490,14 @@ The processor handles `SIGINT`/`SIGTERM`:
 ### Phase 4: Infrastructure
 - docker-compose.yml (Kafka + LocalStack)
 - LocalStack init script (SNS, SQS, S3)
-- Multi-stage Dockerfile
+- Dockerfiles with musl build tag
 
 ### Phase 5: Testing
-- Unit tests for all internal packages
-- Integration tests: godog features, testcontainers, step definitions
+- Unit tests for all internal packages (testify mocks, table-driven)
+- Integration tests: godog + testcontainers (Kafka module + LocalStack)
+- Mutation tests: gremlins with coverpkg per package
 
-### Phase 6: Quality
-- .golangci.yml tuning
-- Coverage enforcement
-- CI target validation
+### Phase 6: Quality & Observability
+- .golangci.yml tuning, coverage enforcement (75% min)
+- Mutation testing enforcement (60% min)
+- OpenTelemetry: traces + metrics + logs via OTLP HTTP
